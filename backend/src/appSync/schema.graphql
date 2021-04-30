@@ -1,0 +1,68 @@
+type Point {
+  lat: Float!
+  lon: Float!
+}
+
+input PointInput {
+  lat: Float!
+  lon: Float!
+}
+
+type Quake {
+  id: ID!
+  time: Long!
+  title: String!
+  mag: Float!
+  coordinates: Point!
+}
+
+type Center {
+  lat: Float!
+  lng: Float!
+}
+
+input CenterInput {
+  lat: Float!
+  lng: Float!
+}
+
+type ProfileDetails {
+  mapTypeId: String!
+  zoom: Int!
+  center: Center!
+}
+
+input ProfileDetailsInput {
+  mapTypeId: String!
+  zoom: Int!
+  center: CenterInput!
+}
+
+type UserProfile {
+  profileDetails: ProfileDetails!
+}
+
+type Mutation {
+  putQuake(id: ID!, time: Long!, title: String!, mag: Float!, coordinates: PointInput!): Quake
+  deleteQuake(id: ID!): ID
+  putUserProfile(profileDetails: ProfileDetailsInput!): UserProfile
+}
+
+type Query {
+  getQuake(id: ID!): Quake
+  # top 500 quakes last week
+  getTopQuakesLastWeek: [Quake]
+  # top 500 quakes last week nearby
+  getTopQuakesLastWeekNearby(origin: PointInput!, kmRadius: Float!): [Quake]
+  getUserProfile: UserProfile
+}
+
+type Subscription {
+  onPutQuake: Quake @aws_subscribe(mutations: ["putQuake"])
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}

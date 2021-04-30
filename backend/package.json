@@ -1,0 +1,27 @@
+{
+    "name": "backend",
+    "description": "backend",
+    "version": "0.0.1",
+    "private": true,
+    "dependencies": {
+        "aws-sdk": "^2.1048.0",
+        "axios": "^0.21.4",
+        "graphql": "^15.8.0",
+        "graphql-tag": "^2.12.6"
+    },
+    "devDependencies": {
+        "dotenv-cli": "^4.1.1",
+        "eslint": "^7.32.0",
+        "eslint-config-airbnb-base": "^14.2.1",
+        "eslint-plugin-import": "^2.25.3",
+        "jest": "^26.6.3",
+        "prettier": "^2.5.1"
+    },
+    "scripts": {
+        "lint": "eslint ./ --ext js",
+        "unit": "jest '.*\\.unitTest\\..*'",
+        "integration": "docker-compose up --force-recreate --remove-orphans -d  && sleep 10 && dotenv -e .env -- jest '.*\\.integrationTest\\..*' ; docker-compose down",
+        "test:ci": "npm ci && npm run lint && npm run unit && npm run integration",
+        "deploy:ci": "sam build -u && sam deploy --region eu-west-1 --stack-name earthwatch --capabilities CAPABILITY_NAMED_IAM  --resolve-s3 --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides \"oAuthClientId=1048530870985-t7ai3aavtnu4e75714jtfabrbf4f2qrn.apps.googleusercontent.com oAuthClientSecret=${GOOGLE_OAUTH_CLIENT_SECRET}\" certificateArn=\"arn:aws:acm:us-east-1:448340158869:certificate/cf8ee7ef-5aa4-40f2-92fd-e3093624c451\""
+    }
+}

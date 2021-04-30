@@ -1,0 +1,10 @@
+export const {
+    REGION,
+    APP_SYNC_HOSTNAME,
+    USER_POOL_ID,
+    USER_POOL_WEB_CLIENT_ID,
+    USER_POOL_DOMAIN,
+    IDENTITY_POOL_ID,
+    MAPS_API_KEY,
+    REDIRECT_URL
+} = process.env;

@@ -1,0 +1,19 @@
+#set( $start_time = $util.time.nowEpochMilliSeconds() - 7 * 24 * 60 * 60 * 1000 )
+{
+  "version":"2017-02-28",
+  "operation":"GET",
+  "path":"/quakes/_search",
+  "params":{
+    "body": {
+      "size": 500,
+      "sort": [{ "mag": "desc" }],
+      "query": {
+        "range": {
+          "time": {
+            "gte": $start_time
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,557 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  dataAcquisitionLambdaMinutesInterval:
+    Description: the duration in minutes between data acquisition lambda calls
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 60
+  seedingDays:
+    Description: the number of days worth of data the ES cluster will be seeded with
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 7
+  readBackMinutes:
+    Description: the number of minutes worth of data will be fetched on each lambda invocation
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 61
+  oAuthClientId:
+    Description: the oAuthClientId for social login through google
+    Type: String
+    Default: must be provided manually
+  oAuthClientSecret:
+    Description: the oAuthClientSecret
+    Type: String
+    Default: must be provided manually
+  site:
+    Description: the site name
+    Type: String
+    Default: earthwatch
+  domainName:
+    Description: the domain name for the site
+    Type: String
+    Default: demo.g4s9.com
+  certificateArn:
+    Description: the certificate for the CloudFront distribution
+    Type: String
+    Default: must be provided manually
+
+Resources:
+  dataAcquisitionLambdaTrigger:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Sub "cron(0/${dataAcquisitionLambdaMinutesInterval} * * * ? *)"
+      State: ENABLED
+      Targets:
+        - Id: !Ref dataAcquisitionLambda
+          Arn: !GetAtt dataAcquisitionLambda.Arn
+
+  dataAcquisitionLambdaTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref dataAcquisitionLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt dataAcquisitionLambdaTrigger.Arn
+
+  dataAcquisitionLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: >-
+        the lambda function which retrieves the data from the USGS API
+      Handler: src/handlers/dataAcquisitionHandler.handler
+      Runtime: nodejs14.x
+      MemorySize: 256
+      Timeout: 120
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - sqs:SendMessage*
+            Resource:
+              - !GetAtt sqsQueue.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:GetParameter
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*"
+      Environment:
+        Variables:
+          seedingDoneParamName: !Ref seedingDoneParam
+          sqsQueueUrl: !Ref sqsQueue
+          seedingDays: !Ref seedingDays
+          readBackMinutes: !Ref readBackMinutes
+
+  seedingDoneParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub "/${AWS::StackName}/seedingDone"
+      Value: "false"
+
+  sqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      KmsMasterKeyId: alias/aws/sqs
+      KmsDataKeyReusePeriodSeconds: 3600
+      # 6 * dataPersistingLambda's timeout
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt sqsDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  sqsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      KmsMasterKeyId: alias/aws/sqs
+      KmsDataKeyReusePeriodSeconds: 3600
+
+  esSearchDomain:
+    Type: AWS::Elasticsearch::Domain
+    Properties:
+      ElasticsearchVersion: "7.10"
+      ElasticsearchClusterConfig:
+        InstanceCount: 1
+        InstanceType: t2.small.elasticsearch
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 10
+        VolumeType: gp2
+
+  esSearchDomainSeedingLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/esSeedingHandler.handler
+      Runtime: nodejs14.x
+      MemorySize: 128
+      Timeout: 30
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - es:ESHttpPut
+            Resource:
+              - !Sub "${esSearchDomain.DomainArn}/*"
+
+  esSearchDomainSeedingResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt esSearchDomainSeedingLambda.Arn
+      esSearchDomainEndpoint: !GetAtt esSearchDomain.DomainEndpoint
+      indexName: quakes
+
+  userProfileTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: id
+        Type: String
+
+  graphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: !Sub "${AWS::StackName}GraphQLApi"
+      AuthenticationType: AWS_IAM
+
+  graphQLElasticsearchDataSourceServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: appsync.amazonaws.com
+          Action:
+            sts:AssumeRole
+      Policies:
+        - PolicyName: AppSyncServiceRoleToAccessEs
+          PolicyDocument:
+            Statement:
+              Effect: Allow
+              Action:
+                - es:ESHttpDelete
+                - es:ESHttpHead
+                - es:ESHttpGet
+                - es:ESHttpPost
+                - es:ESHttpPut
+              Resource:
+                - !Sub "${esSearchDomain.DomainArn}/*"
+
+  graphQLDynamoDbDataSourceServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: appsync.amazonaws.com
+          Action:
+            sts:AssumeRole
+      Policies:
+        - PolicyName: AppSyncServiceRoleToAccessDynamoDb
+          PolicyDocument:
+            Statement:
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt userProfileTable.Arn
+
+  graphQLElasticsearchDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      ElasticsearchConfig:
+        AwsRegion: !Ref AWS::Region
+        Endpoint: !Sub "https://${esSearchDomain.DomainEndpoint}"
+      Name: !Sub "${AWS::StackName}GraphQLElasticsearchDataSource"
+      ServiceRoleArn: !GetAtt graphQLElasticsearchDataSourceServiceRole.Arn
+      Type: AMAZON_ELASTICSEARCH
+
+  graphQLDynamoDbDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DynamoDBConfig:
+        AwsRegion: !Ref AWS::Region
+        TableName: !Ref userProfileTable
+      Name: !Sub "${AWS::StackName}GraphQLDynamoDbDataSource"
+      ServiceRoleArn: !GetAtt graphQLDynamoDbDataSourceServiceRole.Arn
+      Type: AMAZON_DYNAMODB
+
+  graphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DefinitionS3Location: src/appSync/schema.graphql
+
+  putQuakeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLElasticsearchDataSource.Name
+      TypeName: Mutation
+      FieldName: putQuake
+      RequestMappingTemplateS3Location: src/appSync/putQuakeRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/putQuakeResponseMapping.vtl
+
+  deleteQuakeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLElasticsearchDataSource.Name
+      TypeName: Mutation
+      FieldName: deleteQuake
+      RequestMappingTemplateS3Location: src/appSync/deleteQuakeRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/deleteQuakeResponseMapping.vtl
+
+  getQuakeResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLElasticsearchDataSource.Name
+      TypeName: Query
+      FieldName: getQuake
+      RequestMappingTemplateS3Location: src/appSync/getQuakeRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/getQuakeResponseMapping.vtl
+
+  getTopQuakesLastWeekResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLElasticsearchDataSource.Name
+      TypeName: Query
+      FieldName: getTopQuakesLastWeek
+      RequestMappingTemplateS3Location: src/appSync/getTopQuakesLastWeekRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/getTopQuakesLastWeekResponseMapping.vtl
+
+  getTopQuakesLastWeekNearbyResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLElasticsearchDataSource.Name
+      TypeName: Query
+      FieldName: getTopQuakesLastWeekNearby
+      RequestMappingTemplateS3Location: src/appSync/getTopQuakesLastWeekNearbyRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/getTopQuakesLastWeekNearbyResponseMapping.vtl
+
+  putUserProfileResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLDynamoDbDataSource.Name
+      TypeName: Mutation
+      FieldName: putUserProfile
+      RequestMappingTemplateS3Location: src/appSync/putUserProfileRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/putUserProfileResponseMapping.vtl
+
+  getUserProfileResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt graphQLApi.ApiId
+      DataSourceName: !GetAtt graphQLDynamoDbDataSource.Name
+      TypeName: Query
+      FieldName: getUserProfile
+      RequestMappingTemplateS3Location: src/appSync/getUserProfileRequestMapping.vtl
+      ResponseMappingTemplateS3Location: src/appSync/getUserProfileResponseMapping.vtl
+
+  dataPersistingLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: >-
+        the lambda function which persists the data into ES
+      Handler: src/handlers/dataPersistingHandler.handler
+      Runtime: nodejs14.x
+      MemorySize: 128
+      Timeout: 10
+      # max 5 lambdas reading the queue parallel
+      # make sure unreserved concurrency is at least 50+amount_to_be_reserved
+      # ReservedConcurrentExecutions: 5
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - sqs:receiveMessage
+              - sqs:deleteMessage*
+              - sqs:GetQueueAttributes
+            Resource:
+              - !GetAtt sqsQueue.Arn
+        - Statement:
+            Effect: Allow
+            Action:
+              - es:ESHttpPut
+            Resource:
+              - !Sub "${esSearchDomain.DomainArn}/*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - appsync:GraphQL
+            Resource:
+              - !Sub "${graphQLApi}/*"
+      Environment:
+        Variables:
+          sqsQueueUrl: !Ref sqsQueue
+          graphQLApiUrl: !GetAtt graphQLApi.GraphQLUrl
+          esSearchDomainEndpoint: !GetAtt esSearchDomain.DomainEndpoint
+          indexName: quakes
+
+  dataPersistingLambdaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      Enabled: true
+      EventSourceArn: !GetAtt sqsQueue.Arn
+      FunctionName: !GetAtt dataPersistingLambda.Arn
+      MaximumBatchingWindowInSeconds: 10
+
+  cognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameAttributes:
+        - email
+
+  cognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref AWS::StackName
+      UserPoolId: !Ref cognitoUserPool
+
+  cognitoUserPoolIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId: !Ref cognitoUserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref oAuthClientId
+        client_secret: !Ref oAuthClientSecret
+        authorize_scopes: email
+      AttributeMapping:
+        email: email
+
+  cognitoUserPoolClient:
+    DependsOn: cognitoUserPoolIdentityProvider
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref cognitoUserPool
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+      SupportedIdentityProviders:
+        - Google
+      CallbackURLs:
+        - !Sub "https://${site}.${domainName}/"
+        - http://localhost:8000/
+      LogoutURLs:
+        - !Sub "https://${site}.${domainName}/"
+        - http://localhost:8000/
+
+  cognitoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref cognitoUserPoolClient
+          ProviderName: !GetAtt cognitoUserPool.ProviderName
+
+  cognitoUnauthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+      Policies:
+        - PolicyName: cognitoUnauthenticatedPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Effect: Allow
+              Action:
+                - appsync:GraphQL
+              Resource:
+                - !Sub "${graphQLApi}/types/Query/fields/getTopQuakesLastWeek"
+                - !Sub "${graphQLApi}/types/Query/fields/getUserProfile"
+                - !Sub "${graphQLApi}/types/Subscription/fields/onPutQuake"
+
+  cognitoAuthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+      Policies:
+        - PolicyName: cognitoAuthenticatedPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Effect: Allow
+              Action:
+                - appsync:GraphQL
+              Resource:
+                - !Sub "${graphQLApi}/types/Query/fields/getTopQuakesLastWeek"
+                - !Sub "${graphQLApi}/types/Query/fields/getUserProfile"
+                - !Sub "${graphQLApi}/types/Mutation/fields/putUserProfile"
+                - !Sub "${graphQLApi}/types/Subscription/fields/onPutQuake"
+
+  cognitoIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref cognitoIdentityPool
+      Roles:
+        unauthenticated: !GetAtt  cognitoUnauthenticatedRole.Arn
+        authenticated: !GetAtt cognitoAuthenticatedRole.Arn
+
+  cloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: CloudFrontOriginAccessIdentity to access frontendBucket
+
+  frontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${site}.${domainName}"
+
+  frontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref frontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource:
+              - !Sub "arn:aws:s3:::${frontendBucket}/*"
+            Principal:
+              AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${cloudFrontOriginAccessIdentity}"
+
+  cloudfrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        PriceClass: PriceClass_100
+        Aliases:
+          - !Sub "${site}.${domainName}"
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2
+        Origins:
+          - Id: frontendBucket
+            DomainName: !GetAtt frontendBucket.DomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${cloudFrontOriginAccessIdentity}"
+        ViewerCertificate:
+          AcmCertificateArn: !Ref certificateArn
+          MinimumProtocolVersion: TLSv1.1_2016
+          SslSupportMethod: sni-only
+        DefaultCacheBehavior:
+          Compress: 'true'
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: false
+          TargetOriginId: frontendBucket
+          ViewerProtocolPolicy: redirect-to-https
+
+  cloudFrontRoute53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Sub "${domainName}."
+      Name: !Sub "${site}.${domainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt cloudfrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+Outputs:
+  region:
+    Value: !Ref AWS::Region
+  cognitoUserPoolId:
+    Value: !Ref cognitoUserPool
+  cognitoUserPoolArn:
+    Value: !GetAtt cognitoUserPool.Arn
+  cognitoUserPoolDomain:
+    Value: !Ref cognitoUserPoolDomain
+  cognitoUserPoolProviderName:
+    Value: !GetAtt cognitoUserPool.ProviderName
+  cognitoUserPoolProviderURL:
+    Value: !GetAtt cognitoUserPool.ProviderURL
+  cognitoUserPoolClientId:
+    Value: !Ref cognitoUserPoolClient
+  cognitoIdentityPoolId:
+    Value: !Ref cognitoIdentityPool
+  cognitoIdentityPoolName:
+    Value: !GetAtt cognitoIdentityPool.Name
+  graphQLApiArn:
+    Value: !Ref graphQLApi
+  graphQLApiId:
+    Value: !GetAtt graphQLApi.ApiId
+  graphQLUrl:
+    Value: !GetAtt graphQLApi.GraphQLUrl

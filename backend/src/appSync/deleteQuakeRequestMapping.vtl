@@ -1,0 +1,16 @@
+{
+  "version":"2017-02-28",
+  "operation":"POST",
+  "path": "/quakes/_delete_by_query?conflicts=proceed&refresh=true",
+  "params":{
+    "body": {
+      "query": {
+        "term": {
+          "id": {
+            "value": $util.toJson(${context.arguments.id})
+          }
+        }
+      }
+    }
+  }
+}

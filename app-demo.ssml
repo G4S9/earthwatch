@@ -1,0 +1,38 @@
+<speak>
+  <p>After loading the application, the map shows the 500
+    highest magnitude earthquakes from the last week.</p>
+
+  <p>A handy tool-tip provides more information about individual
+    events.</p>
+
+  <p>It is possible to pan and zoom the map as usual.</p>
+
+  <p>However if the user is not logged in, the map settings are
+    lost on page reloads and browser restarts.</p>
+
+  <p>Let's login to solve this.</p>
+
+  <p>The map settings are now preserved on page reloads.</p>
+
+ <p>The debug log shows, that each change of the map settings
+    is automatically uploaded to the backend.</p>
+
+  <p>Would it not be great, if we could test the real-time
+    updates as well?</p>
+
+  <p>Let's head over to the AWS console, and navigate to the AppSync
+    API, to do this.</p>
+
+  <p>Let's choose queries, and add a mutation, that submits a new event
+    manually.</p>
+
+  <p>Let's clear the frontend logs too, so real-time updates are easier
+    to spot.</p>
+
+  <p>After executing the mutation, a notification is going to be sent to the client
+    immediately.</p>
+
+  <p>We can confirm this both by checking the frontend logs, and
+    moving the mouse to the new event placed on the map.</p>
+
+</speak>

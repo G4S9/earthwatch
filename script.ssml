@@ -1,0 +1,258 @@
+<speak>
+  <p>Hello and welcome!</p>
+  <break />
+
+  <p>In the next minutes I am going to present you EarthWatch,
+    an online, near real-time, geological activity monitoring
+    application.</p>
+
+  <break />
+
+  <p>Let's start with the architecture.</p>
+
+  <break />
+
+  <p>Our data-source is the United States Geological Survey's real-time API
+    that provides earthquake data updated every minute.</p>
+
+  <p>Unfortunately the REST API does not support streaming, so a Lambda
+    function triggered by a scheduled EventBridge rule must
+    poll the API at regular intervals.</p>
+
+  <break />
+
+  <p>Once being invoked, the Lambda function will load a parameter from the SSM
+    parameter store, to detect whether this was the first time it was invoked,
+    in which case it is going to fetch a whole week worth of data to seed
+    the back-end.</p>
+
+  <break />
+
+  <p>At this stage it might be tempting to just go ahead and write the
+    data into Elasticsearch directly.</p>
+
+  <p>But instead of that we are going to
+    decouple the data acquisition and persistence, by employing an SQS standard
+    queue.</p>
+
+  <p>Using the SQS queue will make it possible to rate limit the updates
+    sent to Elasticsearch as well as to implement retries
+    in case of errors, without ever loosing input data.</p>
+
+  <break />
+
+  <p>An alternative solution could have been to ingest the data into Dynamo-DB,
+    however we have neither sustained enough usage, as our data arrives in short
+    bursts, nor a requirement for in order processing or long term input persistence.</p>
+
+  <break />
+
+  <p>A quick calculation using Amazon's cost calculator also shows that we are
+    better off using an SQS queue.</p>
+
+  <break />
+
+  <p>An SQS FIFO queue is also out of the picture for the same and further
+    performance considerations.</p>
+
+  <p>An important thing to remember is however, that SQS standard queues
+    only support AtLeastOnce delivery and as such the same input can be
+    processed multiple times.</p>
+
+
+  <break />
+
+  <p>After the seeding has been completed and the data has been stored in
+    the queue, the Lambda function is going to update the SSM parameter to
+    indicate that subsequent runs need to fetch only incremental updates.</p>
+
+  <p>How much exactly of course depends on the frequency of the scheduled
+    EventBridge rule, one minute in our case.</p>
+
+  <break />
+
+  <p>The data stored in the SQS queue is going to be processed by another Lambda
+    function, this time triggered by the SQS queue, mapped as the Lambda's
+    event source.</p>
+
+  <break />
+
+  <p>As a side note: because of the internals of the Lambda event source mapping,
+    we have to make sure that the SQS queue's redrive policy, and visibility timeout, are
+    configured, in respect of the Lambda function's timeout setting.</p>
+
+  <break />
+
+  <p>The Lambda function will send the queue items marked as being acquired during
+    the seeding phase, directly to Elasticsearch, but later records are going to be
+    sent to the AppSync API, enabling the backend to deliver real-time updates to the
+    clients.</p>
+
+  <break />
+
+  <p>The frontend, being a static website implemented using the Gatsby React framework,
+    is going to be served from an S3 bucket, in front of which a CloudFront
+    distribution will act as the caching and content delivery layer.</p>
+
+  <break />
+
+  <p>Once the browser loads the starting page, the javascript client will attempt
+    authentication using Cognito Identity Pools.</p>
+
+  <break />
+
+  <p>Depending on the success of this authentication step, the client will then receive
+    either an anonymous identity, or the identity of the signed-in user.</p>
+
+  <p>An unauthenticated client will of course have the possibility, to sign in any
+    time, using the Google federation feature of Cognito User Pools.</p>
+
+  <break />
+
+  <p>Was the authentication successful or not, the main difference between the
+    anonymous and the signed-in user scenarios, is that signed-in users will be
+    able to store their profile in a Dynamo-DB table, so their
+    map settings can survive page reloads and browser restarts.</p>
+
+  <p>Even though saving the profile data would have been possible using anonymous
+    identities as well, I did not implement this, partly to provide an incentive
+    for signed-in users, partly to make it easier to demonstrate the difference
+    between the two modes of authentication.</p>
+
+  <break />
+
+  <p>Besides using different I.A.M. roles assigned to the authenticated
+    and unauthenticated clients, the AppSync API can further be protected by a Web
+    Application Firewall ACL, that implements rate control, and so
+    prevents abuse.</p>
+
+  <p>As a side note: AWS shield standard against DDoS attacks is also already on by
+    default, on all AWS accounts.</p>
+
+  <break />
+
+  <p>A further security measure is, that all services used, support encryption of
+   data in transit, and at rest.</p>
+
+  <break />
+
+  <p>The C.I.C.D. pipeline is also implemented using serverless resources.</p>
+
+  <p>Code-commit serves as the code repository and CodeBuild as the build
+    environment.</p>
+
+  <break />
+
+  <p>Because the serverless application framework is perfectly capable of deploying
+    the app through CloudFormation, and the AWS CLI can deploy the static website
+    to S3, we do not necessarily need CodeDeploy to deploy our stack.</p>
+
+  <p>Using CodeDeploy however, gives us the advantage of being able to implement
+    separation of duties between the build and deployment stages, and to tune service
+    permissions accordingly.</p>
+
+  <p>In case of a  long running canary deployment to Lambda, relying on for
+    example canaries implemented with CloudWatch Synthetics, we can
+    reduce costs by releasing our resource intensive CodeBuild environment as soon
+    as possible, since there are no additional charges for deployments to EC2,
+    Lambda or ECS through Code-Deploy.</p>
+
+  <break />
+
+  <p>Let's continue with discussing app resiliency.</p>
+
+  <break />
+
+  <p>The RTO and RPO requirements for disaster recovery, will highly influence
+    the decisions around the D.R. architecture.</p>
+
+  <p>Whether the strategy is going to be backup and restore, pilot light, or
+    warm standby, can only be decided knowing the exact requirements and allocated
+    budgets.</p>
+
+  <break />
+
+  <p>Since we use serverless resources, we are well protected against an
+    availability zone outage, we just have to make sure to implement a multi
+    a-zee deployment of Elasticsearch. </p>
+
+  <p>But what should happen in case of a regional disaster?</p>
+
+  <p>We could, for example, deploy the complete stack in another secondary region via
+    CloudFormation stack sets, say with the Cloudwatch rule disabled, but what's
+    next?</p>
+
+  <break />
+
+  <p>We store our state at multiple places: Elasticsearch, DynamoDb, S3, Cognito,
+    and let's not forget about our flag in SSM.</p>
+
+  <p>Elasticsearch does support cross-region domain synchronization, but since we
+    can re-seed Elasticsearch relatively easily, we do not need to replicate our
+    E.S. cluster.</p>
+
+  <p>For this reason we do not need to replicate the SSM flag either.</p>
+
+  <break />
+
+  <p>We can replicate our user profiles in DynamoDb, the easiest, via DynamoDb
+    global tables.</p>
+
+  <p>S3 supports cross region replication as well.</p>
+
+  <p>CloudFront supports, origin fail-over.</p>
+
+  <p>Our identity store is located at a 3rd party, again not something we
+    need to, or can worry about.</p>
+
+  <p>So far so good.</p>
+
+  <p>But what about Cognito?</p>
+
+  <p>Cognito too, is a regional resource.</p>
+
+  <break />
+
+  <p>Seamless Cognito replication across regions, is yet-to-be solved in AWS.</p>
+
+  <p>There is a solution involving a replication scheme using an import-export logic
+    via DynamoDb global tables, this however takes some effort to implement, in
+    which case we might even find ourselves moving away from Cognito completely,
+    and implementing a Lambda authorizer, backed by DynamoDb global tables instead.</p>
+
+  <break />
+
+  <p>Finally some thoughts about monitoring and security.</p>
+
+  <break />
+
+  <p>AWS Organizations provides us not just a way to implement consolidated billing,
+    but through separation of development, production, and security organization units,
+    and by applying appropriate service control policies, we can implement the
+    least privilege principle.</p>
+
+  <p>Service Catalog can provide a way to preserve productivity through enabling
+    the deployment of pre-approved products into restricted environments.</p>
+
+  <p>Macie can help to protect sensitive data.</p>
+
+  <p>Guard-Duty can help in early detection of malicious activities and
+    malfunctions.</p>
+
+  <p>Services like CloudWatch, CloudTrail, Config, Athena, and QuickSight, can help to
+    implement the required range of detective controls.</p>
+
+  <p>Config auto remediation and SSM Automation documents, are a possible way to
+    implement corrective controls.</p>
+
+  <break />
+
+  <p>Let me conclude my presentation, with this amazing picture from USGS
+    showing more than a century's worth of 7+ magnitude earthquakes
+    around the globe.</p>
+
+  <p>I hope you enjoyed the presentation.</p>
+
+  <p>Thanks for watching, and good bye!</p>
+
+</speak>

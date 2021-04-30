@@ -1,0 +1,42 @@
+name: Test and Deploy Frontend
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'frontend/**'
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Test
+        working-directory: ./frontend
+        run: |
+          echo testing...
+          export NVM_DIR=~/.nvm
+          source ~/.nvm/nvm.sh
+          nvm install
+          nvm use
+          npm run test:ci
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+      - uses: aws-actions/setup-sam@v1
+      - uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+      - name: Deploy
+        working-directory: ./frontend
+        run: |
+          echo deploying...
+          export NVM_DIR=~/.nvm
+          source ~/.nvm/nvm.sh
+          nvm install
+          nvm use
+          npm run deploy:ci
